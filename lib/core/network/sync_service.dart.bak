@@ -1,0 +1,402 @@
+import 'dart:async';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
+import 'package:drift/drift.dart';
+import '../database/database.dart';
+import 'api_client.dart';
+import '../providers/database_provider.dart';
+import '../constants/app_constants.dart';
+
+part 'sync_service.g.dart';
+
+@Riverpod(keepAlive: true)
+class SyncService extends _$SyncService {
+  Timer? _syncTimer;
+  bool _isSyncing = false;
+  final List<StreamSubscription<ConnectivityResult>> _subscriptions = [];
+  final Map<String, DateTime> _lastSyncTimes = {};
+
+  @override
+  FutureOr<void> build() {
+    _init();
+    ref.onDispose(() => dispose());
+    return null;
+  }
+
+  void _init() {
+    _setupConnectivityListener();
+    _startPeriodicSync();
+  }
+
+  void _setupConnectivityListener() {
+    try {
+      final connectivity = Connectivity();
+      // FIXED: Properly handle the List<ConnectivityResult>
+      final connectivitySubscription = connectivity.onConnectivityChanged.listen(
+        (List<ConnectivityResult> results) {
+          // Take the first result or default to none
+          final result = results.isNotEmpty ? results.first : ConnectivityResult.none;
+          _handleConnectivityChange(result);
+        },
+      );
+      _subscriptions.add(connectivitySubscription);
+    } catch (e) {
+      debugPrint('❌ Failed to setup connectivity listener: $e');
+    }
+  }
+
+  void _handleConnectivityChange(ConnectivityResult result) {
+    if (_hasInternetConnection(result)) {
+      debugPrint('📱 Network available - starting sync');
+      syncAll();
+    }
+  }
+
+  bool _hasInternetConnection(ConnectivityResult result) {
+    return result != ConnectivityResult.none;
+  }
+
+  void _startPeriodicSync() {
+    _syncTimer?.cancel();
+    _syncTimer = Timer.periodic(
+      const Duration(minutes: 5),
+      (timer) => syncAll(),
+    );
+  }
+
+  Future<bool> _checkConnectivity() async {
+    try {
+      final List<ConnectivityResult> results = await Connectivity().checkConnectivity();
+      // FIXED: Properly check if any connection exists
+      return results.isNotEmpty && !results.contains(ConnectivityResult.none);
+    } catch (e) {
+      debugPrint('❌ Connectivity check failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> syncAll() async {
+    if (_isSyncing) return;
+
+    final hasConnection = await _checkConnectivity();
+    if (!hasConnection) {
+      debugPrint('📱 No network connection - skipping sync');
+      return;
+    }
+
+    _isSyncing = true;
+    debugPrint('🔄 Starting full sync...');
+
+    try {
+      await syncMessages();
+      await syncFeed();
+      await syncProfile();
+      await _syncPendingActions();
+      
+      debugPrint('✅ Sync completed successfully');
+    } catch (e) {
+      debugPrint('❌ Sync failed: $e');
+    } finally {
+      _isSyncing = false;
+    }
+  }
+
+  Future<bool> syncMessages() async {
+    try {
+      debugPrint('📨 Syncing messages...');
+      final api = ref.read(apiClientProvider);
+      final db = ref.read(appDatabaseProvider);
+
+      final chats = await db.select(db.chats).get();
+
+      for (final chat in chats) {
+        await _syncChatMessages(chat, api, db);
+      }
+      
+      await _sendPendingMessages();
+      debugPrint('✅ Messages sync completed');
+      return true;
+    } catch (e) {
+      debugPrint('❌ Message sync failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _syncChatMessages(Chat chat, ApiClient api, AppDatabase db) async {
+    try {
+      final lastSync = await _getLastSyncTime('messages_${chat.id}');
+      final remoteMessages = await api.syncMessages(
+        chatId: chat.id,
+        since: lastSync,
+      );
+
+      if (remoteMessages.isEmpty) return;
+
+      await db.batch((batch) {
+        for (final msgData in remoteMessages) {
+          _insertMessageBatch(batch, db, msgData);
+        }
+      });
+
+      await _updateLastSyncTime('messages_${chat.id}');
+    } catch (e) {
+      debugPrint('❌ Failed to sync chat ${chat.id}: $e');
+    }
+  }
+
+  void _insertMessageBatch(Batch batch, AppDatabase db, Map<String, dynamic> msgData) {
+    try {
+      final id = msgData['id'] as String? ?? '';
+      final chatId = msgData['chatId'] as String? ?? '';
+      final senderId = msgData['senderId'] as String? ?? '';
+      final content = msgData['content'] as String?;
+      final status = msgData['status']?.toString() ?? AppConstants.messageStatusDelivered;
+      final timestampStr = msgData['timestamp'] as String?;
+      
+      if (id.isEmpty || chatId.isEmpty || senderId.isEmpty || timestampStr == null) {
+        debugPrint('⚠️ Skipping invalid message data: $msgData');
+        return;
+      }
+
+      final timestamp = DateTime.parse(timestampStr);
+      
+      // FIXED: Create the companion with proper values
+      final messageCompanion = MessagesCompanion.insert(
+        id: id,
+        chatId: chatId,
+        senderId: senderId,
+        content: content != null ? Value(content) : const Value.absent(),
+        status: Value(status),
+        timestamp: timestamp,
+      );
+      
+      batch.insert(
+        db.messages,
+        messageCompanion,
+        mode: InsertMode.insertOrReplace,
+      );
+    } catch (e) {
+      debugPrint('❌ Failed to insert message batch: $e');
+    }
+  }
+
+  Future<void> _sendPendingMessages() async {
+    try {
+      final api = ref.read(apiClientProvider);
+      final db = ref.read(appDatabaseProvider);
+      final pendingMessages = await db.getPendingMessages();
+      
+      if (pendingMessages.isEmpty) return;
+
+      debugPrint('📤 Sending ${pendingMessages.length} pending messages...');
+      
+      for (final message in pendingMessages) {
+        await _sendSingleMessage(api, db, message);
+      }
+    } catch (e) {
+      debugPrint('❌ Failed to send pending messages: $e');
+    }
+  }
+
+  Future<void> _sendSingleMessage(ApiClient api, AppDatabase db, Message message) async {
+    try {
+      await api.sendMessage({
+        'id': message.id,
+        'chatId': message.chatId,
+        'senderId': message.senderId,
+        'content': message.content,
+        'mediaUrl': message.mediaUrl,
+        'mediaType': message.mediaType,
+        'timestamp': message.timestamp.toIso8601String(),
+      });
+      await db.updateMessageStatus(message.id, AppConstants.messageStatusSent);
+      debugPrint('✅ Message ${message.id} sent successfully');
+    } catch (e) {
+      debugPrint('❌ Failed to send message ${message.id}: $e');
+    }
+  }
+
+  Future<bool> syncFeed() async {
+    try {
+      debugPrint('📰 Syncing feed...');
+      final api = ref.read(apiClientProvider);
+      final db = ref.read(appDatabaseProvider);
+      final lastSync = await _getLastSyncTime('feed');
+      final posts = await api.syncFeed(since: lastSync);
+
+      if (posts.isNotEmpty) {
+        await db.batch((batch) {
+          for (final post in posts) {
+            _insertPostBatch(batch, db, post);
+          }
+        });
+      }
+      
+      await _updateLastSyncTime('feed');
+      debugPrint('✅ Feed sync completed: ${posts.length} posts');
+      return true;
+    } catch (e) {
+      debugPrint('❌ Feed sync failed: $e');
+      return false;
+    }
+  }
+
+  void _insertPostBatch(Batch batch, AppDatabase db, Map<String, dynamic> post) {
+    try {
+      final id = post['id'] as String? ?? '';
+      final authorId = post['authorId'] as String? ?? '';
+      final authorName = post['authorName'] as String? ?? '';
+      final timestampStr = post['timestamp'] as String?;
+      final content = post['content'] as String?;
+      final mediaUrl = post['mediaUrl'] as String?;
+      final mediaType = post['mediaType'] as String?;
+      final heatScore = (post['heat_score'] as num?)?.toDouble() ?? 0.0;
+
+      if (id.isEmpty || authorId.isEmpty || authorName.isEmpty || timestampStr == null) {
+        debugPrint('⚠️ Skipping invalid post data: $post');
+        return;
+      }
+
+      final timestamp = DateTime.parse(timestampStr);
+      
+      batch.insert(
+        db.postsMetadata,
+        PostsMetadataCompanion.insert(
+          postId: id,
+          authorId: authorId,
+          authorName: authorName,
+          timestamp: timestamp,
+          content: content != null ? Value(content) : const Value.absent(),
+          mediaUrl: mediaUrl != null ? Value(mediaUrl) : const Value.absent(),
+          mediaType: mediaType != null ? Value(mediaType) : const Value.absent(),
+          heatScore: Value(heatScore),
+        ),
+        mode: InsertMode.insertOrReplace,
+      );
+    } catch (e) {
+      debugPrint('❌ Failed to insert post batch: $e');
+    }
+  }
+
+  Future<bool> syncProfile() async {
+    try {
+      debugPrint('👤 Syncing profile...');
+      final api = ref.read(apiClientProvider);
+      final db = ref.read(appDatabaseProvider);
+      final userId = await _getCurrentUserId();
+      
+      if (userId == null) {
+        debugPrint('⚠️ No user ID available for profile sync');
+        return false;
+      }
+
+      final data = await api.getUserProfile(userId);
+      await _saveUserProfile(db, data);
+      
+      debugPrint('✅ Profile sync completed');
+      return true;
+    } catch (e) {
+      debugPrint('❌ Profile sync failed: $e');
+      return false;
+    }
+  }
+
+  Future<void> _saveUserProfile(AppDatabase db, Map<String, dynamic> data) async {
+    try {
+      final id = data['id'] as String? ?? '';
+      final displayName = data['displayName'] as String? ?? '';
+      final username = data['username'] as String? ?? '';
+      final bio = data['bio'] as String?;
+      final avatarUrl = data['avatarUrl'] as String?;
+      final followerCount = data['followerCount'] as int? ?? 0;
+      final followingCount = data['followingCount'] as int? ?? 0;
+      final postCount = data['postCount'] as int? ?? 0;
+
+      if (id.isEmpty || displayName.isEmpty || username.isEmpty) {
+        debugPrint('⚠️ Invalid profile data: missing required fields');
+        return;
+      }
+      
+      await db.into(db.userProfiles).insertOnConflictUpdate(
+        UserProfilesCompanion.insert(
+          userId: id,
+          displayName: displayName,
+          username: username,
+          bio: bio != null ? Value(bio) : const Value.absent(),
+          avatarUrl: avatarUrl != null ? Value(avatarUrl) : const Value.absent(),
+          followerCount: Value(followerCount),
+          followingCount: Value(followingCount),
+          postCount: Value(postCount),
+          heatScore: const Value(0.0),
+        ),
+      );
+    } catch (e) {
+      debugPrint('❌ Failed to save user profile: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> _syncPendingActions() async {
+    try {
+      final api = ref.read(apiClientProvider);
+      final db = ref.read(appDatabaseProvider);
+      final pendingActions = await db.getPendingActions();
+
+      if (pendingActions.isEmpty) return;
+
+      debugPrint('🔄 Syncing ${pendingActions.length} pending actions...');
+
+      for (final action in pendingActions) {
+        await _processPendingAction(api, db, action);
+      }
+    } catch (e) {
+      debugPrint('❌ Pending actions sync failed: $e');
+    }
+  }
+
+  Future<void> _processPendingAction(
+    ApiClient api, 
+    AppDatabase db, 
+    PendingAction action,
+  ) async {
+    try {
+      switch (action.actionType) {
+        case 'like':
+          await api.interactWithPost(action.targetId, 'like');
+          break;
+        case 'follow':
+          await api.toggleFollow(action.targetId);
+          break;
+        default:
+          debugPrint('⚠️ Unknown action type: ${action.actionType}');
+          return;
+      }
+      await db.removePendingAction(action.id);
+      debugPrint('✅ Action ${action.id} completed');
+    } catch (e) {
+      debugPrint('❌ Failed to sync action ${action.id}: $e');
+    }
+  }
+
+  Future<DateTime?> _getLastSyncTime(String key) async => _lastSyncTimes[key];
+  
+  Future<void> _updateLastSyncTime(String key) async {
+    _lastSyncTimes[key] = DateTime.now();
+  }
+
+  Future<String?> _getCurrentUserId() async {
+    // TODO: Implement actual user ID retrieval
+    return 'current_user_id';
+  }
+
+  void dispose() {
+    _syncTimer?.cancel();
+    for (final subscription in _subscriptions) {
+      subscription.cancel();
+    }
+    _subscriptions.clear();
+    _lastSyncTimes.clear();
+  }
+}
