@@ -11,9 +11,9 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
-        // --- ADDED FOR FLUTTER_LOCAL_NOTIFICATIONS ---
+        // --- MANDATORY FIX FOR NOTIFICATIONS ---
         isCoreLibraryDesugaringEnabled = true 
-        // ---------------------------------------------
+        // ---------------------------------------
 
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -26,7 +26,7 @@ android {
     defaultConfig {
         applicationId = "com.example.here"
         
-        // Ensure minSdk is at least 21 for desugaring to work smoothly
+        // Desugaring requires minSdk 21 to avoid bugs on older devices
         minSdk = 21 
         
         targetSdk = flutter.targetSdkVersion
@@ -36,6 +36,7 @@ android {
 
     buildTypes {
         release {
+            // Signing with the debug keys for now
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -46,7 +47,7 @@ flutter {
 }
 
 dependencies {
-    // --- THE "DICTIONARY" THE COMPILER NEEDS ---
+    // --- THIS IS THE "TRANSLATOR" THE COMPILER IS ASKING FOR ---
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
-    // -------------------------------------------
+    // -----------------------------------------------------------
 }
