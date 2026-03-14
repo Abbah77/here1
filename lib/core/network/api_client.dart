@@ -16,9 +16,9 @@ ApiClient apiClient(ApiClientRef ref) {
 }
 
 class ApiClient {
-  static const String _baseUrl = 'https://here-backend.onrender.com'; // TODO: Replace with actual backend URL
+  static const String _baseUrl = 'https://here-backend-fgw2.onrender.com';
  
-  late final Dio _dio;
+ late final Dio _dio;
   final _storage = const FlutterSecureStorage();
   
   ApiClient() {
