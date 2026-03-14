@@ -42,16 +42,12 @@ class ApiClient {
     if (token != null) {
       options.headers['Authorization'] = 'Bearer $token';
     }
-    
     debugPrint('🌐 API Request: ${options.method} ${options.path}');
     handler.next(options);
   }
   
   void _onError(DioException error, ErrorInterceptorHandler handler) {
     debugPrint('❌ API Error: ${error.message}');
-    if (error.response != null) {
-      debugPrint('📦 Response Data: ${error.response?.data}');
-    }
     handler.next(error);
   }
   
@@ -66,11 +62,11 @@ class ApiClient {
     }
   }
   
-  /// FIXED: Login now uses FormData to satisfy FastAPI's OAuth2PasswordRequestForm
+  /// FIXED: Login now uses FormData + URL Encoding to stop the 422 Error
   Future<Map<String, dynamic>> login(String email, String password) async {
     try {
       final formData = FormData.fromMap({
-        'username': email, // OAuth2 specifically looks for 'username'
+        'username': email, 
         'password': password,
       });
 
@@ -78,7 +74,7 @@ class ApiClient {
         '/auth/login', 
         data: formData,
         options: Options(
-          contentType: Headers.formUrlEncodedContentType, // Crucial for 422 fix
+          contentType: Headers.formUrlEncodedContentType, 
         ),
       );
       
@@ -95,7 +91,6 @@ class ApiClient {
     required String password,
   }) async {
     try {
-      // Registration still uses JSON
       final response = await _dio.post('/auth/register', data: {
         'name': name,
         'email': email,
@@ -111,37 +106,64 @@ class ApiClient {
 
   Future<Map<String, dynamic>> _handleAuthResponse(Response response) async {
     final data = response.data;
-    // Python returns 'access_token', we check both for safety
     final token = data['access_token'] ?? data['token'];
     
     if (token != null) {
       await _storage.write(key: 'auth_token', value: token);
-      
-      // Save user details for offline/quick access
       if (data['user'] != null) {
-        final userId = data['user']['id'].toString();
-        await _storage.write(key: 'user_id', value: userId);
-        await _storage.write(key: 'user_data', value: jsonEncode(data['user']));
+        await _storage.write(key: 'user_id', value: data['user']['id'].toString());
       }
       return data;
     }
-    throw Exception('No token received from server');
+    throw Exception('Authentication failed');
   }
   
   Future<void> logout() async {
-    await _storage.deleteAll();
+    await _storage.delete(key: 'auth_token');
+    await _storage.delete(key: 'user_id');
   }
   
-  // ============= FEED & POSTS =============
+  // ============= MESSAGE ENDPOINTS =============
   
-  Future<List<Map<String, dynamic>>> syncFeed({DateTime? since, int limit = 50}) async {
+  Future<List<Map<String, dynamic>>> syncMessages({required String chatId, DateTime? since}) async {
+    try {
+      final response = await _dio.get('/messages/sync', queryParameters: {
+        'chatId': chatId,
+        'since': since?.toIso8601String(),
+      });
+      return List<Map<String, dynamic>>.from(response.data['messages'] ?? []);
+    } catch (e) {
+      return [];
+    }
+  }
+  
+  Future<Map<String, dynamic>> sendMessage(Map<String, dynamic> message) async {
+    try {
+      final response = await _dio.post('/messages', data: message);
+      return response.data;
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
+  Future<void> updateMessageStatus(String messageId, String status) async {
+    try {
+      await _dio.patch('/messages/$messageId', data: {'status': status});
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
+  // ============= FEED ENDPOINTS =============
+  
+  Future<List<Map<String, dynamic>>> syncFeed({DateTime? since, int limit = 50, int offset = 0}) async {
     try {
       final response = await _dio.get('/feed/sync', queryParameters: {
         'since': since?.toIso8601String(),
         'limit': limit,
+        'offset': offset,
       });
-      final List data = response.data['posts'] ?? [];
-      return data.cast<Map<String, dynamic>>();
+      return List<Map<String, dynamic>>.from(response.data['posts'] ?? []);
     } catch (e) {
       return [];
     }
@@ -155,39 +177,99 @@ class ApiClient {
       throw _handleError(e);
     }
   }
-
-  // ============= PROFILE & USERS =============
   
-  Future<Map<String, dynamic>> getUserProfile(String userId) async {
+  Future<Map<String, dynamic>> addComment(String postId, String comment) async {
     try {
-      final response = await _dio.get('/auth/me'); // Using /me for current user info
+      final response = await _dio.post('/posts/$postId/comments', data: {'content': comment});
       return response.data;
     } on DioException catch (e) {
       throw _handleError(e);
     }
   }
-
+  
+  Future<Map<String, dynamic>> sharePost(String postId) async {
+    try {
+      final response = await _dio.post('/posts/$postId/share');
+      return response.data;
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
+  Future<void> interactWithPost(String postId, String action) async {
+    try {
+      await _dio.post('/posts/$postId/interact', data: {'action': action});
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
+  // ============= PROFILE ENDPOINTS =============
+  
+  Future<Map<String, dynamic>> getUserProfile(String userId) async {
+    try {
+      final response = await _dio.get('/users/$userId');
+      return response.data;
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
+  Future<Map<String, dynamic>> updateProfile(Map<String, dynamic> profileData) async {
+    try {
+      final response = await _dio.patch('/profile', data: profileData);
+      return response.data;
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
+  Future<void> toggleFollow(String userId) async {
+    try {
+      await _dio.post('/users/$userId/follow');
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
   Future<List<Map<String, dynamic>>> searchUsers(String query) async {
     try {
-      final response = await _dio.get('/auth/search', queryParameters: {'q': query});
-      final List data = response.data['users'] ?? [];
-      return data.cast<Map<String, dynamic>>();
+      final response = await _dio.get('/users/search', queryParameters: {'q': query});
+      return List<Map<String, dynamic>>.from(response.data['users'] ?? []);
     } catch (e) {
       return [];
     }
   }
   
-  // ============= MEDIA =============
+  // ============= MEDIA ENDPOINTS =============
   
-  Future<String> uploadMedia(File file) async {
+  Future<String> uploadMediaFile(File file, String type) async {
     try {
-      String fileName = file.path.split('/').last;
-      FormData formData = FormData.fromMap({
-        "file": await MultipartFile.fromFile(file.path, filename: fileName),
+      final formData = FormData.fromMap({
+        'file': await MultipartFile.fromFile(file.path, filename: file.path.split('/').last),
+        'type': type,
       });
-
       final response = await _dio.post('/media/upload', data: formData);
       return response.data['url'];
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
+  Future<Map<String, dynamic>> uploadMedia(FormData formData) async {
+    try {
+      final response = await _dio.post('/media/upload', data: formData);
+      return response.data;
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+  
+  Future<void> deleteMedia(String url) async {
+    try {
+      final uri = Uri.parse(url);
+      final key = uri.pathSegments.last;
+      await _dio.delete('/media/$key');
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -199,13 +281,9 @@ class ApiClient {
     if (error.response != null) {
       final data = error.response?.data;
       if (data is Map && data.containsKey('detail')) {
-        // FastAPI validation errors are often a list in 'detail'
-        if (data['detail'] is List) {
-          return Exception(data['detail'][0]['msg'] ?? 'Validation Error');
-        }
         return Exception(data['detail'].toString());
       }
     }
-    return Exception(error.message ?? 'Unknown connection error');
+    return Exception('Network error: ${error.message}');
   }
 }
