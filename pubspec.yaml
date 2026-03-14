@@ -57,7 +57,10 @@ dependencies:
   url_launcher: ^6.2.4
   
   # Background Tasks
-  workmanager: ^0.5.2
+  workmanager:
+  git:
+    url: https://github.com/fluttercommunity/flutter_workmanager.git
+    ref: main
   flutter_local_notifications: ^17.1.0
   drift_dev: ^2.28.0
   build_runner: ^2.5.4
