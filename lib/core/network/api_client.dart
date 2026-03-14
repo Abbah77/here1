@@ -35,7 +35,7 @@ class ApiClient {
     if (token != null) {
       options.headers['Authorization'] = 'Bearer $token';
     }
-    debugPrint('🌐 API: ${options.method} ${options.path}');
+    debugPrint('🌐 API Request: ${options.method} ${options.path}');
     handler.next(options);
   }
   
@@ -53,6 +53,7 @@ class ApiClient {
     } catch (_) { return false; }
   }
   
+  /// FIXED: Matches your successful HTML test result
   Future<Map<String, dynamic>> login(String email, String password) async {
     try {
       final formData = FormData.fromMap({
@@ -88,20 +89,27 @@ class ApiClient {
     } on DioException catch (e) { throw _handleError(e); }
   }
 
+  /// REFACTORED: No longer crashes if 'user' object is missing
   Future<Map<String, dynamic>> _handleAuthResponse(Response response) async {
     final data = response.data;
+    debugPrint('📦 Processing Auth Data: $data');
+
+    // Matches 'access_token' from your successful backend test
     final token = data['access_token'] ?? data['token'];
     
     if (token != null) {
-      await _storage.write(key: 'auth_token', value: token);
+      await _storage.write(key: 'auth_token', value: token.toString());
       
-      // Pull user data safely from nested or flat response
-      final userData = data['user'] ?? data;
-      if (userData != null && userData['id'] != null) {
-        await _storage.write(key: 'user_id', value: userData['id'].toString());
+      // Safely check for user data without crashing if it's null
+      final userData = data['user'];
+      if (userData != null) {
+        if (userData['id'] != null) {
+          await _storage.write(key: 'user_id', value: userData['id'].toString());
+        }
         await _storage.write(key: 'user_data', value: jsonEncode(userData));
       }
-      return data;
+      
+      return Map<String, dynamic>.from(data);
     }
     throw Exception('Authentication failed: No token received');
   }
