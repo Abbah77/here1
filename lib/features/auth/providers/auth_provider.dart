@@ -87,7 +87,7 @@ class CurrentUser extends _$CurrentUser {
 
 @riverpod
 Future<bool> usernameAvailability(UsernameAvailabilityRef ref, String username) async {
-  // This bypasses the local DB check and always says "Yes, it's available"
-  // allowing the 'Create Account' button to work.
-  return true; 
+  if (username.length < 3) return false;
+  final db = ref.watch(appDatabaseProvider);
+  return !(await db.usernameExists(username));
 }
