@@ -6,7 +6,7 @@ import 'package:workmanager/workmanager.dart';
 // Ensure these paths match your folder structure perfectly
 import 'package:here/core/providers/theme_provider.dart';
 import 'package:here/core/providers/sync_provider.dart'; 
-import 'package:here/core/widgets/auth_guard.dart'; // Updated path to match widget location
+import 'package:here/core/guard/auth_guard.dart'; 
 import 'package:here/features/home/views/screens/main_screen.dart';
 
 @pragma('vm:entry-point')
