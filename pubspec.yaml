@@ -22,7 +22,7 @@ dependencies:
   riverpod_annotation: ^2.3.3
   
   # Encryption - REPLACED flutter_sodium with sodium_libs
-  sodium_libs: ^1.2.6 # More compatible with modern ffi
+  sodium_libs: ^1.2.5+1 # More compatible with modern ffi
   local_auth: ^2.1.7
   flutter_secure_storage: ^9.0.0
   pointycastle: ^3.7.3
