@@ -31,9 +31,9 @@ class WebSocketService {
   WebSocketService(this._ref);
   
   String? get _baseUrl {
-    // Use WebSocket URL (ws:// or wss://)
-    return 'ws://localhost:8000/ws'; // TODO: Configure based on environment
-  }
+  // Use WebSocket URL (wss:// for production)
+  return 'wss://here-backend-fgw2.onrender.com/ws'; // Production WebSocket
+}
   
   Future<void> connect() async {
     if (_isConnected) return;
