@@ -57,7 +57,7 @@ dependencies:
   url_launcher: ^6.2.4
   
   # Background Tasks
-  workmanager: ^0.5.2+r2
+  workmanager: ^0.5.2
   flutter_local_notifications: ^17.1.0
   drift_dev: ^2.28.0
   build_runner: ^2.5.4
