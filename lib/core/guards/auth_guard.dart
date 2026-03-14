@@ -16,28 +16,36 @@ class AuthGuard extends ConsumerWidget {
     
     return authState.when(
       data: (status) {
+        debugPrint('🛡️ AuthGuard Status: $status');
+        
         switch (status) {
           case AuthStatus.authenticated:
             return child;
-          case AuthStatus.unauthenticated:
-          case AuthStatus.error: // Added missing error case
-            return const AuthScreen();
+          
           case AuthStatus.authenticating:
+            // If we are currently logging in, we stay on the AuthScreen
+            // so the user can see the progress indicator on the button.
+            return const AuthScreen();
+
+          case AuthStatus.unauthenticated:
+          case AuthStatus.error:
           case AuthStatus.initial:
-            return const _LoadingScreen();
+          default:
+            return const AuthScreen();
         }
       },
-      // If there's an error (like a DB failure), default to AuthScreen so they can try logging in again
+      // In case of a major provider failure, send them back to login
       error: (error, stack) {
-        debugPrint('AuthGuard Error: $error');
+        debugPrint('❌ AuthGuard Error: $error');
         return const AuthScreen();
       },
+      // Show this only during the very first app launch (CheckSession)
       loading: () => const _LoadingScreen(),
     );
   }
 }
 
-/// Extracted loading UI to keep the build method clean
+/// A clean, professional loading screen for the initial splash
 class _LoadingScreen extends StatelessWidget {
   const _LoadingScreen();
 
@@ -49,8 +57,15 @@ class _LoadingScreen extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text('Verifying session...', style: TextStyle(color: Colors.grey)),
+            SizedBox(height: 20),
+            Text(
+              'Verifying session...', 
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+                color: Colors.grey,
+              ),
+            ),
           ],
         ),
       ),
