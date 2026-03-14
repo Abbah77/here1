@@ -12,7 +12,7 @@ dependencies:
   
   # Core
   drift: ^2.14.1
-  sqlite3_flutter_libs: ^0.6.0+eol
+  sqlite3_flutter_libs: ^0.5.24
   path_provider: ^2.1.1
   path: ^1.9.0
   
