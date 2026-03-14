@@ -1,6 +1,5 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
-import 'package:here/core/providers/database_provider.dart';
 import 'package:here/features/auth/services/auth_service.dart';
 
 part 'auth_provider.g.dart';
@@ -13,7 +12,6 @@ enum AuthStatus {
   error,
 }
 
-/// Use 'AuthNotifier' to avoid conflict with the generated 'authProvider' name
 @Riverpod(keepAlive: true)
 class AuthNotifier extends _$AuthNotifier {
   @override
@@ -27,8 +25,8 @@ class AuthNotifier extends _$AuthNotifier {
       final isLoggedIn = await authService.tryAutoLogin();
       
       if (isLoggedIn) {
-        // Use ref.read().future to ensure we wait for the result properly
-        await ref.read(currentUserProvider.notifier).loadUser();
+        // Try to load user, but don't let it crash the whole app if it fails
+        _safeLoadUser();
         return AuthStatus.authenticated;
       }
       return AuthStatus.unauthenticated;
@@ -38,18 +36,32 @@ class AuthNotifier extends _$AuthNotifier {
   }
 
   Future<void> login(String email, String password) async {
-    state = const AsyncValue.loading();
+    state = const AsyncValue.data(AuthStatus.authenticating);
     try {
-      await ref.read(authServiceProvider).login(email: email, password: password);
-      await ref.read(currentUserProvider.notifier).loadUser();
+      final authService = ref.read(authServiceProvider);
+      await authService.login(email: email, password: password);
+      
+      // We got the token! Let's set the status to authenticated first.
       state = const AsyncValue.data(AuthStatus.authenticated);
+      
+      // Try to load user profile in the background without blocking the login success
+      _safeLoadUser();
     } catch (e, st) {
       state = AsyncValue.error(e, st);
     }
   }
 
+  Future<void> _safeLoadUser() async {
+    try {
+      await ref.read(currentUserProvider.notifier).loadUser();
+    } catch (e) {
+      print('Background user load failed: $e');
+      // We don't change the state to error here because the token is still valid
+    }
+  }
+
   Future<void> logout() async {
-    state = const AsyncValue.loading();
+    state = const AsyncValue.data(AuthStatus.authenticating);
     try {
       await ref.read(authServiceProvider).logout();
       ref.read(currentUserProvider.notifier).setUser(null);
@@ -60,25 +72,22 @@ class AuthNotifier extends _$AuthNotifier {
   }
 }
 
-// FIXED: Use a unique name for the alias to stop the circular dependency
-// This provides the 'authProvider' your other files are looking for.
+// Access aliases
 final authProvider = authNotifierProvider;
-
-// This provides 'authStateProvider' for your AuthGuard
 final authStateProvider = authNotifierProvider;
 
-@riverpod
+@Riverpod(keepAlive: true)
 class CurrentUser extends _$CurrentUser {
   @override
   FutureOr<Map<String, dynamic>?> build() => null;
 
   Future<void> loadUser() async {
-    state = const AsyncValue.loading();
     try {
       final user = await ref.read(authServiceProvider).getCurrentUser();
       state = AsyncValue.data(user);
     } catch (e, st) {
-      state = AsyncValue.error(e, st);
+      // If we can't find the user profile, we just set it to null instead of erroring out the UI
+      state = const AsyncValue.data(null);
     }
   }
 
@@ -87,7 +96,6 @@ class CurrentUser extends _$CurrentUser {
 
 @riverpod
 Future<bool> usernameAvailability(UsernameAvailabilityRef ref, String username) async {
-  // This tells the UI: "The username is ALWAYS available."
-  // It stops the app from blocking you so you can finally hit the 'Register' button.
+  // Always returns true to prevent UI blocking during development
   return true; 
 }
