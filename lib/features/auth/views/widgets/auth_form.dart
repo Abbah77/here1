@@ -22,18 +22,18 @@ class AuthForm extends HookConsumerWidget {
     final isPasswordVisible = useState(false);
     final theme = Theme.of(context);
 
-    // Watch auth state
+    // Watch auth state for loading indicators
     final authState = ref.watch(authStateProvider);
     
-    // FIXED: Use authService directly instead of action providers
+    // Access the service for login/register calls
     final authService = ref.read(authServiceProvider);
     
-    // Username availability - with null check
-    final usernameAsync = usernameController.text.isNotEmpty
+    // Username availability check logic
+    final usernameAsync = !isLogin && usernameController.text.isNotEmpty
         ? ref.watch(usernameAvailabilityProvider(usernameController.text))
         : const AsyncValue.data(null);
 
-    // Input formatters
+    // Input formatter for clean usernames
     final usernameFormatter = FilteringTextInputFormatter.allow(
       RegExp(r'[a-zA-Z0-9._]'),
     );
@@ -41,66 +41,67 @@ class AuthForm extends HookConsumerWidget {
     Future<void> handleSubmit() async {
       if (!formKey.currentState!.validate()) return;
 
-      bool success;
+      bool success = false;
       
-      if (isLogin) {
-        try {
+      try {
+        if (isLogin) {
+          // LOGIN LOGIC
           final response = await authService.login(
             email: emailController.text.trim(),
             password: passwordController.text,
           );
-          success = response['token'] != null;
-        } catch (e) {
-          success = false;
-          debugPrint('Login error: $e');
-        }
-      } else {
-        // Check username availability
-        final isAvailable = usernameAsync.value ?? false;
-        if (!isAvailable) {
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Username is already taken'),
-                backgroundColor: Colors.red,
-              ),
-            );
+          
+          // FIXED: We check for 'access_token' to match your Python/OAuth2 backend
+          success = response['access_token'] != null || response['token'] != null;
+          debugPrint('🔑 Login check: Token received = $success');
+        } else {
+          // SIGNUP LOGIC
+          final isAvailable = usernameAsync.value ?? false;
+          if (!isAvailable) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Username is already taken'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+            return;
           }
-          return;
-        }
-        
-        try {
+          
           final response = await authService.register(
             name: nameController.text.trim(),
             email: emailController.text.trim(),
             username: usernameController.text.trim(),
             password: passwordController.text,
           );
-          success = response['token'] != null;
-        } catch (e) {
-          success = false;
-          debugPrint('Registration error: $e');
+          success = response['access_token'] != null || response['token'] != null;
         }
-      }
 
-      if (success && context.mounted) {
-        // Navigate to home
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(
-            builder: (context) => const MainScreen(),
-          ),
-        );
-      } else if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isLogin 
-                  ? 'Login failed. Check your credentials.'
-                  : 'Registration failed. Please try again.'
+        if (success && context.mounted) {
+          // Successfully logged in/registered, go to Home
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (context) => const MainScreen(),
             ),
-            backgroundColor: Colors.red,
-          ),
-        );
+          );
+        } else if (context.mounted) {
+          throw Exception('Missing token in server response');
+        }
+      } catch (e) {
+        debugPrint('❌ Authentication Error: $e');
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                isLogin 
+                    ? 'Login failed. Check your credentials.'
+                    : 'Registration failed. Please try again.'
+              ),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
 
@@ -157,7 +158,6 @@ class AuthForm extends HookConsumerWidget {
                 labelText: 'Username',
                 hintText: 'Enter unique username',
                 prefixIcon: const Icon(Icons.alternate_email),
-                helperText: 'Only letters, numbers, dots and underscores',
                 suffixIcon: usernameController.text.isNotEmpty
                     ? usernameAsync.when(
                         data: (isAvailable) {
@@ -190,7 +190,6 @@ class AuthForm extends HookConsumerWidget {
                 return null;
               },
               onChanged: (_) {
-                // Trigger validation
                 formKey.currentState?.validate();
               },
             ),
@@ -231,9 +230,7 @@ class AuthForm extends HookConsumerWidget {
             Align(
               alignment: Alignment.centerRight,
               child: TextButton(
-                onPressed: () {
-                  _showForgotPasswordDialog(context, ref);
-                },
+                onPressed: () => _showForgotPasswordDialog(context, ref),
                 style: TextButton.styleFrom(
                   padding: EdgeInsets.zero,
                   minimumSize: const Size(50, 30),
@@ -315,7 +312,6 @@ class AuthForm extends HookConsumerWidget {
           ElevatedButton(
             onPressed: () async {
               if (emailController.text.isEmpty) return;
-              
               Navigator.pop(context);
               
               try {
