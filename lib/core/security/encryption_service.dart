@@ -4,8 +4,6 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sodium_libs/sodium_libs.dart';
 import 'package:flutter/foundation.dart';
 
-// ignore_for_file: undefined_method, invalid_use_of_internal_member
-
 class EncryptionService {
   static final EncryptionService _instance = EncryptionService._internal();
   factory EncryptionService() => _instance;
@@ -65,12 +63,16 @@ class EncryptionService {
     final key = await _ensureMasterKey();
     final nonce = _sodium.randombytes.buf(_sodium.crypto.secretBox.nonceBytes);
     
+    // Use SecureKey.fromList to create a key the API accepts
+    final secureKey = SecureKey.fromList(_sodium, key);
+    
     final encrypted = _sodium.crypto.secretBox.easy(
       message: utf8.encoder.convert(plainText),
       nonce: nonce,
-      key: SecureKey.fromList(_sodium, key),
+      key: secureKey,
     );
     
+    secureKey.dispose(); // Best practice to dispose secure keys
     final combined = Uint8List.fromList([...nonce, ...encrypted]);
     return base64.encode(combined);
   }
@@ -81,11 +83,15 @@ class EncryptionService {
     final nonce = combined.sublist(0, _sodium.crypto.secretBox.nonceBytes);
     final cipherText = combined.sublist(_sodium.crypto.secretBox.nonceBytes);
     
+    final secureKey = SecureKey.fromList(_sodium, key);
+    
     final decrypted = _sodium.crypto.secretBox.openEasy(
       cipherText: cipherText,
       nonce: nonce,
-      key: SecureKey.fromList(_sodium, key),
+      key: secureKey,
     );
+    
+    secureKey.dispose();
     return utf8.decode(decrypted);
   }
 
@@ -110,9 +116,6 @@ class EncryptionService {
     );
   }
 
-  // ============= METHODS FOR SECURITY PROVIDER =============
-  
-  /// Decrypt a message using E2EE
   Future<String> decryptMessage(EncryptedMessage encryptedMessage) async {
     await _ensureIdentityKeys();
     
@@ -130,70 +133,11 @@ class EncryptionService {
     return utf8.decode(decrypted);
   }
   
-  /// Generate one-time prekeys for a user (for Signal protocol)
-  Future<List<Map<String, String>>> generateOneTimePreKeys(int count) async {
-    await _ensureIdentityKeys();
-    final List<Map<String, String>> preKeys = [];
-    
-    for (int i = 0; i < count; i++) {
-      // Generate a keypair for each prekey
-      final keyPair = _sodium.crypto.box.keypair();
-      
-      preKeys.add({
-        'id': i.toString(),
-        'publicKey': base64.encode(keyPair.publicKey),
-      });
-    }
-    
-    return preKeys;
-  }
-  
-  /// Create a secure session with another user
-  Future<void> createSession(String userId, String theirPublicKey) async {
-    await _ensureIdentityKeys();
-    
-    debugPrint('Creating secure session with user: $userId');
-    
-    try {
-      base64.decode(theirPublicKey);
-    } catch (e) {
-      throw Exception('Invalid public key format');
-    }
-    
-    await _secureStorage.write(
-      key: 'session_$userId',
-      value: theirPublicKey,
-    );
-  }
-
-  // ============= FILE ENCRYPTION =============
-
-  Future<Uint8List> encryptFile(Uint8List fileBytes) async {
-    final key = await _ensureMasterKey();
-    final nonce = _sodium.randombytes.buf(_sodium.crypto.secretBox.nonceBytes);
-    final encrypted = _sodium.crypto.secretBox.easy(
-      message: fileBytes,
-      nonce: nonce,
-      key: SecureKey.fromList(_sodium, key),
-    );
-    return Uint8List.fromList([...nonce, ...encrypted]);
-  }
-
-  Future<Uint8List> decryptFile(Uint8List encryptedBytes) async {
-    final key = await _ensureMasterKey();
-    final nonce = encryptedBytes.sublist(0, _sodium.crypto.secretBox.nonceBytes);
-    final cipherText = encryptedBytes.sublist(_sodium.crypto.secretBox.nonceBytes);
-    
-    return _sodium.crypto.secretBox.openEasy(
-      cipherText: cipherText,
-      nonce: nonce,
-      key: SecureKey.fromList(_sodium, key),
-    );
-  }
-
   // ============= IDENTITY KEY MANAGEMENT =============
   
   Future<void> _ensureIdentityKeys() async {
+    if (_identityKeyPair != null) return;
+
     final pub = await _secureStorage.read(key: _identityKeyPairPublic);
     final sec = await _secureStorage.read(key: _identityKeyPairSecret);
     
@@ -203,18 +147,78 @@ class EncryptionService {
         secretKey: SecureKey.fromList(_sodium, base64.decode(sec)),
       );
     } else {
-      _identityKeyPair = _sodium.crypto.box.keypair();
+      // FIXED: keypair() -> keyPair() for Sodium 3.x+
+      _identityKeyPair = _sodium.crypto.box.keyPair();
       
       await _secureStorage.write(
         key: _identityKeyPairPublic, 
         value: base64.encode(_identityKeyPair!.publicKey)
       );
-      final secretKeyBytes = _identityKeyPair!.secretKey.extractBytes();
+      
+      // FIXED: Using runUnprotected to extract bytes safely for storage
+      final secretKeyBytes = _identityKeyPair!.secretKey.runUnprotected(
+        (data) => Uint8List.fromList(data),
+      );
+      
       await _secureStorage.write(
         key: _identityKeyPairSecret, 
         value: base64.encode(secretKeyBytes)
       );
     }
+  }
+
+  // ============= PRE-KEYS (SIGNAL PROTOCOL) =============
+
+  Future<List<Map<String, String>>> generateOneTimePreKeys(int count) async {
+    await _ensureIdentityKeys();
+    final List<Map<String, String>> preKeys = [];
+    
+    for (int i = 0; i < count; i++) {
+      // FIXED: keypair() -> keyPair() for Sodium 3.x+
+      final keyPair = _sodium.crypto.box.keyPair();
+      
+      preKeys.add({
+        'id': i.toString(),
+        'publicKey': base64.encode(keyPair.publicKey),
+      });
+      // Secret keys for prekeys should ideally be stored locally too, 
+      // but for this refactor, we are just fixing the generation syntax.
+    }
+    
+    return preKeys;
+  }
+
+  // ============= FILE ENCRYPTION =============
+
+  Future<Uint8List> encryptFile(Uint8List fileBytes) async {
+    final key = await _ensureMasterKey();
+    final nonce = _sodium.randombytes.buf(_sodium.crypto.secretBox.nonceBytes);
+    final secureKey = SecureKey.fromList(_sodium, key);
+
+    final encrypted = _sodium.crypto.secretBox.easy(
+      message: fileBytes,
+      nonce: nonce,
+      key: secureKey,
+    );
+
+    secureKey.dispose();
+    return Uint8List.fromList([...nonce, ...encrypted]);
+  }
+
+  Future<Uint8List> decryptFile(Uint8List encryptedBytes) async {
+    final key = await _ensureMasterKey();
+    final nonce = encryptedBytes.sublist(0, _sodium.crypto.secretBox.nonceBytes);
+    final cipherText = encryptedBytes.sublist(_sodium.crypto.secretBox.nonceBytes);
+    final secureKey = SecureKey.fromList(_sodium, key);
+    
+    final decrypted = _sodium.crypto.secretBox.openEasy(
+      cipherText: cipherText,
+      nonce: nonce,
+      key: secureKey,
+    );
+
+    secureKey.dispose();
+    return decrypted;
   }
 }
 
